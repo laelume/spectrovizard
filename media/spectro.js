@@ -1,4 +1,5 @@
-// Copyright 2026 laelume. Licensed under GPL-3. 
+// Copyright 2026 laelume. All rights reserved.
+// BSD 3-Clause License.
 //
 // All DSP runs client-side. No Python subprocess. No Node.js audio libraries.
 //
@@ -9,6 +10,16 @@
 //   4. Per-chunk STFT via Cooley-Tukey radix-2 FFT (pure JS)
 //   5. Power spectrum → dB scaling → LUT colormap → canvas pixel rows
 //   6. Chunk-based streaming: render visible window, recompute on scroll
+//
+// References:
+//   [1] Cooley & Tukey (1965) "An algorithm for the machine calculation of
+//       complex Fourier series." Mathematics of Computation 19(90):297–301.
+//       DOI: https://doi.org/10.1090/S0025-5718-1965-0178586-1
+//   [2] Harris (1978) "On the use of windows for harmonic analysis with the
+//       discrete Fourier transform." Proc. IEEE 66(1):51–83.
+//       DOI: https://doi.org/10.1109/PROC.1978.10837
+//   [3] Smith (2011) "Spectral Audio Signal Processing."
+//       https://ccrma.stanford.edu/~jos/sasp/
 
 /* global window, document, AudioContext, OfflineAudioContext */
 
@@ -548,4 +559,247 @@ function drawTimeAxis(totalFrames, canvasW) {
     const nTicks    = Math.max(2, Math.floor(canvasW / 100));
     for (let t = 0; t <= nTicks; t++) {
         const frac = t / nTicks;
-        const x    = Math.round(frac *
+        const x    = Math.round(frac * canvasW);
+        const sec  = frac * totalSec;
+        const label = sec < 60
+            ? sec.toFixed(2) + 's'
+            : Math.floor(sec / 60) + 'm' + (sec % 60).toFixed(1) + 's';
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, 4);
+        ctx.stroke();
+        ctx.fillText(label, x, 14);
+    }
+}
+
+/**
+ * Draw frequency axis ticks and labels to the right of the spectrogram.
+ *
+ * @param {number} nBins  - number of frequency bins
+ * @param {number} viewH  - canvas height
+ */
+function drawFreqAxis(nBins, viewH) {
+    const axCanvas = document.getElementById('freq-axis');
+    axCanvas.width  = FREQ_AXIS_W;
+    axCanvas.height = viewH;
+    const ctx = axCanvas.getContext('2d');
+    ctx.clearRect(0, 0, FREQ_AXIS_W, viewH);
+    ctx.fillStyle   = '#888';
+    ctx.strokeStyle = '#555';
+    ctx.font        = '9px Consolas, monospace';
+    ctx.textAlign   = 'right';
+
+    const nyquist   = STATE.sampleRate / 2;
+    const fmaxHz    = STATE.fmax && STATE.fmax < nyquist ? STATE.fmax : nyquist;
+    const nTicks    = Math.max(2, Math.floor(viewH / 40));
+
+    for (let t = 0; t <= nTicks; t++) {
+        const frac  = t / nTicks;
+        const y     = Math.round(frac * viewH);
+        const freqHz = fmaxHz * (1 - frac);
+        const label  = freqHz >= 1000
+            ? (freqHz / 1000).toFixed(1) + 'k'
+            : Math.round(freqHz) + '';
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(4, y);
+        ctx.stroke();
+        ctx.fillText(label, FREQ_AXIS_W - 6, y + 3);
+    }
+}
+
+// === === === === === === === ===
+// C O N T R O L   W I R I N G
+// ==== ==== ==== ==== ==== ====
+
+/**
+ * Attach change handlers to all panel controls.
+ * Re-render is triggered on mouseup or change (not on every mousemove).
+ */
+function wireControls() {
+    // Helper: attach 'change' and 'mouseup' (for sliders) to an element.
+    const on = (id, fn) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change',  fn);
+        el.addEventListener('mouseup', fn);
+    };
+
+    on('ctrl-nfft',    () => {
+        STATE.nfft  = parseInt(document.getElementById('ctrl-nfft').value, 10);
+        scheduleRender(true);
+    });
+
+    on('ctrl-hop',     () => {
+        STATE.hop   = parseInt(document.getElementById('ctrl-hop').value, 10);
+        scheduleRender(true);
+    });
+
+    on('ctrl-window',  () => {
+        STATE.windowType = document.getElementById('ctrl-window').value;
+        scheduleRender(true);
+    });
+
+    on('ctrl-scale',   () => {
+        STATE.scale = document.getElementById('ctrl-scale').value;
+        scheduleRender(false);
+    });
+
+    on('ctrl-dbrange', () => {
+        STATE.dbRange = parseInt(document.getElementById('ctrl-dbrange').value, 10);
+        document.getElementById('dbrange-val').textContent = STATE.dbRange;
+        scheduleRender(false);
+    });
+
+    on('ctrl-gain',    () => {
+        STATE.gainDb = parseInt(document.getElementById('ctrl-gain').value, 10);
+        document.getElementById('gain-val').textContent = STATE.gainDb;
+        scheduleRender(false);
+    });
+
+    on('ctrl-cmap',    () => {
+        STATE.cmap  = document.getElementById('ctrl-cmap').value;
+        scheduleRender(false);
+    });
+
+    on('ctrl-fmax',    () => {
+        const v     = document.getElementById('ctrl-fmax').value;
+        STATE.fmax  = v ? parseFloat(v) : null;
+        scheduleRender(false);
+    });
+
+    on('ctrl-channel', () => {
+        const v     = document.getElementById('ctrl-channel').value;
+        STATE.channel = v === 'mix' ? 'mix' : parseInt(v, 10);
+        if (STATE.audioBuffer) {
+            applyChannelSelection(STATE.audioBuffer);
+            scheduleRender(true);
+        }
+    });
+}
+
+/**
+ * Re-render when the user scrolls horizontally into an uncached region.
+ */
+function wireScroll() {
+    const scroll = document.getElementById('spectro-scroll');
+    scroll.addEventListener('scroll', () => {
+        const x = scroll.scrollLeft;
+        // Only re-render if scroll crossed a chunk boundary
+        const prevChunk = Math.floor(STATE.lastScrollX / (CHUNK_FRAMES * PX_PER_FRAME));
+        const currChunk = Math.floor(x             / (CHUNK_FRAMES * PX_PER_FRAME));
+        if (prevChunk !== currChunk) {
+            STATE.lastScrollX = x;
+            if (STATE.rafHandle) cancelAnimationFrame(STATE.rafHandle);
+            STATE.rafHandle   = requestAnimationFrame(renderFrame);
+        }
+    });
+}
+
+/**
+ * Show time/frequency cursor readout in the info box on mousemove over canvas.
+ */
+function wireCursorInfo() {
+    const canvas = document.getElementById('spectro-canvas');
+    canvas.addEventListener('mousemove', evt => {
+        const rect   = canvas.getBoundingClientRect();
+        const x      = evt.clientX - rect.left;
+        const y      = evt.clientY - rect.top;
+
+        const frame  = Math.floor(x / PX_PER_FRAME);
+        const timeSec = (frame * STATE.hop) / STATE.sampleRate;
+
+        const nyquist = STATE.sampleRate / 2;
+        const fmaxHz  = STATE.fmax && STATE.fmax < nyquist ? STATE.fmax : nyquist;
+        const freqHz  = fmaxHz * (1 - y / canvas.height);
+
+        document.getElementById('info-cursor').textContent =
+            `t=${timeSec.toFixed(3)}s  f=${Math.round(freqHz)}Hz`;
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+        document.getElementById('info-cursor').textContent = '—';
+    });
+}
+
+// === === === === === === === ===
+// U I   H E L P E R S
+// ==== ==== ==== ==== ==== ====
+
+/**
+ * Populate the audio info box with decoded buffer metadata.
+ */
+function updateInfoBox(buf) {
+    document.getElementById('info-sr').textContent  =
+        `SR: ${buf.sampleRate} Hz`;
+    document.getElementById('info-dur').textContent =
+        `Duration: ${buf.duration.toFixed(3)} s`;
+    document.getElementById('info-ch').textContent  =
+        `Channels: ${buf.numberOfChannels}`;
+    document.getElementById('fmax-hint').textContent =
+        `Nyquist: ${(buf.sampleRate / 2).toLocaleString()} Hz`;
+
+    if (window.SPECTRO_PAYLOAD.audioB64.length * 0.75 > WARN_SIZE_MB * 1024 * 1024) {
+        document.getElementById('info-dur').textContent +=
+            `  ⚠ large file`;
+    }
+}
+
+/**
+ * Update the channel selector to show only valid options for nCh channels.
+ */
+function updateChannelSelector(nCh) {
+    const sel = document.getElementById('ctrl-channel');
+    // Show Ch 2 (R) and Mix only if the file is multi-channel
+    sel.options[1].disabled = nCh < 2;
+    sel.options[2].disabled = nCh < 2;
+}
+
+/**
+ * Hide the loading overlay.
+ */
+function hideLoading() {
+    const ov = document.getElementById('loading-overlay');
+    if (ov) ov.style.display = 'none';
+}
+
+/**
+ * Set the progress bar fill percentage.
+ */
+function setProgress(pct) {
+    const bar = document.getElementById('progress-bar');
+    if (bar) bar.style.width = pct + '%';
+}
+
+/**
+ * Display an error message in the error overlay.
+ */
+function showError(msg) {
+    hideLoading();
+    const el = document.getElementById('error-msg');
+    if (!el) return;
+    el.textContent  = msg;
+    el.style.display = 'flex';
+}
+
+// === === === === === === === ===
+// U T I L I T I E S
+// ==== ==== ==== ==== ==== ====
+
+/**
+ * Decode a base64 string to a Uint8Array.
+ */
+function base64ToUint8(b64) {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+}
+
+/**
+ * Decode a base64 string to an ArrayBuffer.
+ */
+function base64ToArrayBuffer(b64) {
+    const u8 = base64ToUint8(b64);
+    return u8.buffer;
+}

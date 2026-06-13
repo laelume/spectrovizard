@@ -25,7 +25,8 @@ Adjust in the left panel. Changes apply on mouse release.
 | dB range | Colour map dynamic range. Reduce to increase contrast. |
 | Gain | Brightness offset in dB. |
 | Colormap | viridis / magma / inferno / plasma / greys / hot / jet / turbo |
-| Freq max | Crop the frequency axis. Blank = full Nyquist. |
+| Freq min | Set minimum frequency value. Blank = full Nyquist. |
+| Freq max | Set maximum frequency value. Blank = full Nyquist. |
 | Channel | Left, right, or mixed mono. |
 
 ## PCM files
