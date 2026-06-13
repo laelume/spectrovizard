@@ -1,0 +1,38 @@
+{
+  "name": "spectrovizard",
+  "displayName": "SpectroVizard",
+  "description": "Lightweight spectrogram viewer for audio files",
+  "version": "0.0.1",
+  "publisher": "laelume",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Visualization"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "spectrovizard.spectroView",
+        "displayName": "SpectroVizard",
+        "selector": [
+          { "filenamePattern": "*.wav" },
+          { "filenamePattern": "*.mp3" },
+          { "filenamePattern": "*.flac" },
+          { "filenamePattern": "*.ogg" },
+          { "filenamePattern": "*.m4a" },
+          { "filenamePattern": "*.aac" },
+          { "filenamePattern": "*.pcm" }
+        ],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
