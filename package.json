@@ -4,6 +4,10 @@
   "description": "Lightweight spectrogram viewer for audio files",
   "version": "0.0.1",
   "publisher": "laelume",
+  "repository": {
+  "type": "git",
+  "url": "https://github.com/laelume/spectrovizard"
+  },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Visualization"],
   "activationEvents": [],
