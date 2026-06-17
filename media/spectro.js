@@ -21,25 +21,29 @@
 
 'use strict';
 
+// acquireVsCodeApi() must be called exactly once per webview lifetime.
+// Hoisted to module scope to prevent re-invocation on every saveParams() call.
+const _vscode = acquireVsCodeApi();
+
 // === === === === === === === ===
 // C O N S T A N T S
 // ==== ==== ==== ==== ==== ====
 
 // Frames per streaming chunk. Larger = fewer draw calls; smaller = faster scroll response.
-const CHUNK_FRAMES  = 512;
+const CHUNK_FRAMES = 512;
 
 // Frequency axis canvas width (px).
-const FREQ_AXIS_W   = 44;
+const FREQ_AXIS_W  = 44;
 
 // Time axis canvas height (px).
-const TIME_AXIS_H   = 24;
+const TIME_AXIS_H  = 24;
 
-// File size warning threshold (bytes uncompressed estimate).
-const WARN_SIZE_MB  = 50;
+// File size warning threshold (uncompressed byte estimate).
+const WARN_SIZE_MB = 50;
 
 // Zoom slider maps [-4, 4] → scale factor via 2^x.
-// At 0: 1x. At 4: 16x. At -4: 0.0625x.
-const ZOOM_BASE     = 2;
+// At 0: 1x. At 4: 16x. At -4: ~0.06x.
+const ZOOM_BASE    = 2;
 
 // === === === === === === === ===
 // S T A T E
@@ -68,7 +72,7 @@ const STATE = {
 
     // Zoom: stored as slider values [-4,4]; applied as 2^val scale factors
     zoomTime     : 0,      // >0 = expand (more px per frame); <0 = compress
-    zoomFreq     : 0,      // >0 = expand visible freq band upward; handled via fmin/fmax
+    zoomFreq     : 0,      // >0 = narrow visible freq band (zoom in)
 
     // Decoded LUT tables: name → Uint8Array(768)
     luts         : {},
@@ -81,8 +85,23 @@ const STATE = {
     dirty        : true,
     rendering    : false,
     lastScrollX  : 0,
-    rafHandle    : null
+    rafHandle    : null,
+
+    globalPeak : 1.0,
+    peakReady : false,
 };
+
+// === === === === === === === ===
+// P A R A M   P E R S I S T E N C E
+// ==== ==== ==== ==== ==== ====
+
+/**
+ * Keys saved and restored across file navigations via VSCode globalState.
+ */
+const PERSIST_KEYS = [
+    'nfft', 'hop', 'windowType', 'scale', 'dbRange', 'gainDb',
+    'cmap', 'channel', 'fmax', 'fmin', 'zoomTime', 'zoomFreq'
+];
 
 // === === === === === === === ===
 // E N T R Y   P O I N T
@@ -90,7 +109,9 @@ const STATE = {
 
 (function init() {
     /**
-     * Main entry: decode payload, restore params, wire controls, start render.
+     * Main entry: decode payload, wire controls, restore params, start render.
+     * Controls are wired before params are restored so that syncDomToState()
+     * correctly sets .active states without being overwritten by wiring defaults.
      */
     const payload = window.SPECTRO_PAYLOAD;
     if (!payload) { showError('SPECTRO_PAYLOAD missing.'); return; }
@@ -100,9 +121,20 @@ const STATE = {
         STATE.luts[name] = base64ToUint8(b64);
     }
 
+    for (const [name, lut] of Object.entries(STATE.luts)) {
+        console.log(name,
+            'idx0',   lut[0], lut[1], lut[2],
+            'idx255', lut[765], lut[766], lut[767]);
+    }
+
     document.getElementById('filename-label').textContent = payload.filename;
 
-    // Restore persisted params before wiring controls so the DOM reflects saved state
+    // Wire controls first, then restore — order is critical
+    wireControls();
+    wireScroll();
+    wireCursorInfo();
+
+    // Restore saved params after wiring so DOM reflects saved state correctly
     restoreParams(payload.savedParams);
 
     decodeAudio(payload)
@@ -112,43 +144,41 @@ const STATE = {
             updateInfoBox(buf);
             updateChannelSelector(buf.numberOfChannels);
             applyChannelSelection(buf);
+            computeGlobalPeak();
             hideLoading();
             scheduleRender(true);
         })
-        .catch(err => showError(`Audio decode failed: ${err.message}`));
 
-    wireControls();
-    wireScroll();
-    wireCursorInfo();
+        .catch(err => {
+            console.error('decode pipeline error:', err);
+            showError(err.stack || err.message);
+        });
+
 })();
 
-// === === === === === === === ===
-// P A R A M   P E R S I S T E N C E
-// ==== ==== ==== ==== ==== ====
+
 
 /**
- * Keys that are saved and restored across file navigations.
- */
-const PERSIST_KEYS = [
-    'nfft','hop','windowType','scale','dbRange','gainDb',
-    'cmap','channel','fmax','fmin','zoomTime','zoomFreq'
-];
-
-/**
- * Restore STATE and DOM controls from a saved params JSON string.
- * Called before wireControls() so button group active states reflect saved values.
+ * Restore STATE and DOM controls from a saved params value.
+ * Handles both single and double JSON-encoded strings defensively,
+ * since globalState round-trips through JSON.stringify in the host.
  *
- * @param {string} savedJson - JSON string from globalState, may be '{}'
+ * @param {string|object} savedJson
  */
 function restoreParams(savedJson) {
     let saved = {};
-    try { saved = JSON.parse(savedJson || '{}'); } catch { return; }
+    try {
+        let val = savedJson;
+        // Unwrap double-encoded string if necessary
+        if (typeof val === 'string') val = JSON.parse(val);
+        if (typeof val === 'string') val = JSON.parse(val);
+        if (val && typeof val === 'object') saved = val;
+    } catch { return; }
 
     for (const key of PERSIST_KEYS) {
         if (saved[key] !== undefined) STATE[key] = saved[key];
     }
 
-    // Sync DOM to restored STATE values
     syncDomToState();
 }
 
@@ -164,28 +194,27 @@ function syncDomToState() {
     setBtnGroupActive('bg-scale',  STATE.scale);
     setBtnGroupActive('bg-cmap',   STATE.cmap);
 
-    setVal('ctrl-dbrange', STATE.dbRange);
-    setVal('ctrl-gain',    STATE.gainDb);
-    setVal('ctrl-fmax',    STATE.fmax ?? '');
-    setVal('ctrl-fmin',    STATE.fmin ?? 0);
+    setVal('ctrl-dbrange',   STATE.dbRange);
+    setVal('ctrl-gain',      STATE.gainDb);
+    setVal('ctrl-fmax',      STATE.fmax ?? '');
+    setVal('ctrl-fmin',      STATE.fmin ?? 0);
     setVal('ctrl-zoom-time', STATE.zoomTime);
     setVal('ctrl-zoom-freq', STATE.zoomFreq);
 
-    setText('dbrange-val',    STATE.dbRange);
-    setText('gain-val',       STATE.gainDb);
-    setText('zoom-time-val',  zoomLabel(STATE.zoomTime));
-    setText('zoom-freq-val',  zoomLabel(STATE.zoomFreq));
+    setText('dbrange-val',   STATE.dbRange);
+    setText('gain-val',      STATE.gainDb);
+    setText('zoom-time-val', zoomLabel(STATE.zoomTime));
+    setText('zoom-freq-val', zoomLabel(STATE.zoomFreq));
 }
 
 /**
  * Collect current STATE param values and post to the extension host for persistence.
+ * Uses the module-level _vscode handle; never calls acquireVsCodeApi() more than once.
  */
 function saveParams() {
     const params = {};
     for (const key of PERSIST_KEYS) params[key] = STATE[key];
-    // acquireVsCodeApi() must be called exactly once per webview lifetime.
-    if (!window._vscode) window._vscode = acquireVsCodeApi();
-    window._vscode.postMessage({ type: 'saveParams', params });
+    _vscode.postMessage({ type: 'saveParams', params });
 }
 
 // === === === === === === === ===
@@ -215,7 +244,7 @@ async function decodeAudio(payload) {
         offCtx.decodeAudioData(
             arrayBuf,
             buf => { setProgress(90); resolve(buf); },
-            err => reject(new Error(String(err)))
+            err  => reject(new Error(String(err)))
         );
     });
 }
@@ -241,8 +270,8 @@ function decodePcm(arrayBuf, meta) {
     for (let ch = 0; ch < channels; ch++) {
         const chData = audioBuf.getChannelData(ch);
         for (let i = 0; i < frameCount; i++) {
-            const byteOff  = (i * channels + ch) * bytesPerSmp;
-            chData[i]      = readPcmSample(view, byteOff, dtype);
+            const byteOff = (i * channels + ch) * bytesPerSmp;
+            chData[i]     = readPcmSample(view, byteOff, dtype);
         }
     }
 
@@ -262,7 +291,7 @@ function dtypeBytes(dtype) {
 }
 
 /**
- * Read one normalised float sample [-1, 1] from a DataView.
+ * Read one normalised float sample [-1, 1] from a DataView at byteOffset.
  */
 function readPcmSample(view, offset, dtype) {
     switch (dtype) {
@@ -306,6 +335,23 @@ function applyChannelSelection(buf) {
     }
 }
 
+/**
+ * Compute global peak from raw sample amplitude, not FFT output.
+ * Independent of nfft, hop, and window — computed once after channel selection.
+ */
+function computeGlobalPeak() {
+    const samples = STATE.samples;
+    let peak = 1e-12;
+    for (let i = 0; i < samples.length; i++) {
+        const a = Math.abs(samples[i]);
+        if (a > peak) peak = a;
+    }
+    // Store as power equivalent for consistency with magCache units:
+    // magCache holds re²+im² (power); peak amplitude² gives the power reference.
+    STATE.globalPeak = peak * peak * (STATE.nfft / 2) * (STATE.nfft / 2);
+    STATE.peakReady  = true;
+}
+
 // === === === === === === === ===
 // S T F T   C O R E
 // ==== ==== ==== ==== ==== ====
@@ -340,12 +386,12 @@ function fftInPlace(data) {
         for (let i = 0; i < n; i += len) {
             let cRe = 1.0, cIm = 0.0;
             for (let k = 0; k < (len >> 1); k++) {
-                const uRe = data[2*(i+k)],        uIm = data[2*(i+k)+1];
+                const uRe = data[2*(i+k)],     uIm = data[2*(i+k)+1];
                 const h   = i + k + (len >> 1);
                 const vRe = data[2*h]   * cRe - data[2*h+1] * cIm;
                 const vIm = data[2*h]   * cIm + data[2*h+1] * cRe;
-                data[2*(i+k)]   = uRe + vRe;  data[2*(i+k)+1]   = uIm + vIm;
-                data[2*h]       = uRe - vRe;  data[2*h+1]       = uIm - vIm;
+                data[2*(i+k)]   = uRe + vRe;  data[2*(i+k)+1] = uIm + vIm;
+                data[2*h]       = uRe - vRe;  data[2*h+1]     = uIm - vIm;
                 const nRe = cRe * wRe - cIm * wIm;
                 cIm       = cRe * wIm + cIm * wRe;
                 cRe       = nRe;
@@ -385,7 +431,7 @@ function makeWindow(type, n) {
 
 /**
  * Compute STFT power spectrum for frames [startFrame, endFrame).
- * Writes into STATE.magCache at correct offsets.
+ * Writes into STATE.magCache at correct frame offsets.
  *
  * @param {number} startFrame
  * @param {number} endFrame
@@ -409,6 +455,8 @@ function computeChunk(startFrame, endFrame) {
 
         fftInPlace(buf);
 
+        // Store raw power (re²+im²). No scaling applied here.
+        // Intensity mapping occurs in renderTile(); y-axis spacing in binForRow().
         const cacheOff = f * nBins;
         for (let b = 0; b < nBins; b++) {
             const re = buf[2*b], im = buf[2*b+1];
@@ -425,14 +473,14 @@ function computeChunk(startFrame, endFrame) {
  * Convert a zoom slider value [-4, 4] to a linear scale factor via 2^val.
  *
  * @param  {number} sliderVal
- * @returns {number} scale factor
+ * @returns {number}
  */
 function zoomToScale(sliderVal) {
     return Math.pow(ZOOM_BASE, sliderVal);
 }
 
 /**
- * Format zoom scale for display.
+ * Format zoom scale factor for display label.
  *
  * @param  {number} sliderVal
  * @returns {string}
@@ -443,8 +491,8 @@ function zoomLabel(sliderVal) {
 
 /**
  * Compute pixel width per STFT frame given the current time zoom level.
- * At zoomTime=0: 1px/frame. At zoomTime=4: 16px/frame. At zoomTime=-4: ~0.06px/frame.
- * Clamped to a minimum of 1 pixel per frame to avoid sub-pixel tile artefacts.
+ * At zoomTime=0: 1px/frame. At zoomTime=4: 16px/frame.
+ * Minimum 1px/frame to prevent sub-pixel tile artefacts.
  *
  * @returns {number}
  */
@@ -453,9 +501,9 @@ function pxPerFrame() {
 }
 
 /**
- * Compute effective [fminHz, fmaxHz] after applying freq zoom.
+ * Compute effective [fminHz, fmaxHz] after applying manual bounds and freq zoom.
  * Freq zoom narrows the visible band symmetrically around the centre frequency.
- * Manual fmin/fmax overrides are applied first; zoom then contracts the band inward.
+ * Manual fmin/fmax are applied first; zoom then contracts the band inward.
  *
  * @returns {{ fminHz: number, fmaxHz: number }}
  */
@@ -466,13 +514,62 @@ function effectiveFreqBand() {
     const centre  = (rawMax + rawMin) / 2;
     const halfBand = (rawMax - rawMin) / 2;
     const scale   = zoomToScale(STATE.zoomFreq);
-    // Zoom > 1 narrows the band (zoom in); zoom < 1 widens it (zoom out, clamped to raw)
+    // Zoom > 1 narrows the band (zoom in); zoom < 1 widens (clamped to raw bounds)
     const newHalf = halfBand / scale;
     return {
         fminHz : Math.max(rawMin, centre - newHalf),
         fmaxHz : Math.min(rawMax, centre + newHalf)
     };
 }
+
+/**
+ * Map a canvas pixel row to a frequency bin index given the current y-axis mode.
+ * row=0 → fmaxHz (top); row=viewH-1 → fminHz (bottom).
+ *
+ * Modes:
+ *   linear — uniform Hz spacing (equal bin steps)
+ *   log    — logarithmic Hz spacing (equal ratio steps, Audacity default)
+ *   mel    — mel-scale spacing (perceptually uniform)
+ *
+ * Mel conversion: m = 2595 * log10(1 + f/700)
+ * Reference: O'Shaughnessy (1987) "Speech Communication", p.150.
+ *
+ * @param {number} row    - pixel row (0 = top)
+ * @param {number} viewH  - canvas height in pixels
+ * @param {number} nBins  - number of FFT bins (nfft/2 + 1)
+ * @param {number} fminHz
+ * @param {number} fmaxHz
+ * @returns {number} bin index clamped to [0, nBins-1]
+ */
+function binForRow(row, viewH, nBins, fminHz, fmaxHz) {
+    const nyquist = STATE.sampleRate / 2;
+    // Fraction from top: 0 at row=0, 1 at row=viewH-1
+    const frac = (row + 0.5) / viewH;
+
+    let freqHz;
+    if (STATE.scale === 'linear') {
+        // Uniform Hz interpolation
+        freqHz = fmaxHz - frac * (fmaxHz - fminHz);
+
+    } else if (STATE.scale === 'log') {
+        // Logarithmic interpolation — avoid log(0) by clamping fminHz
+        const lo = Math.max(fminHz, 1);
+        const hi = fmaxHz;
+        freqHz = hi * Math.pow(lo / hi, frac);
+
+    } else {
+        // Mel scale
+        const melMin = 2595 * Math.log10(1 + fminHz / 700);
+        const melMax = 2595 * Math.log10(1 + fmaxHz / 700);
+        const mel    = melMax - frac * (melMax - melMin);
+        freqHz       = 700 * (Math.pow(10, mel / 2595) - 1);
+    }
+
+    // Convert Hz to bin index
+    const bin = Math.round(freqHz / nyquist * (nBins - 1));
+    return Math.max(0, Math.min(nBins - 1, bin));
+}
+
 
 // === === === === === === === ===
 // R E N D E R   P I P E L I N E
@@ -481,7 +578,7 @@ function effectiveFreqBand() {
 /**
  * Invalidate caches and schedule a render frame.
  *
- * @param {boolean} recompute - if true, discard magCache and recompute FFT from scratch
+ * @param {boolean} recompute - if true, discard magCache and recompute FFT
  */
 function scheduleRender(recompute) {
     if (!STATE.samples) return;
@@ -492,8 +589,9 @@ function scheduleRender(recompute) {
         STATE.magCache    = new Float32Array(STATE.totalFrames * nBins);
         STATE.tileCache   = new Map();
         STATE.dirty       = true;
+        STATE.peakReady   = false;
+        STATE.globalPeak  = 1.0;
     } else {
-        // Colormap/gain/zoom change: tiles need repaint but magCache is valid
         STATE.tileCache = new Map();
         STATE.dirty     = true;
     }
@@ -504,7 +602,6 @@ function scheduleRender(recompute) {
 
 /**
  * Single animation frame: compute and paint the visible canvas region.
- * Re-schedules itself if scroll brings new chunks into view.
  */
 function renderFrame() {
     STATE.rafHandle = null;
@@ -513,7 +610,7 @@ function renderFrame() {
 
     const scroll      = document.getElementById('spectro-scroll');
     const canvas      = document.getElementById('spectro-canvas');
-    const viewW       = scroll.clientWidth  - FREQ_AXIS_W;
+    const viewW       = scroll.clientWidth - FREQ_AXIS_W;
     const viewH       = scroll.clientHeight;
     const ppf         = pxPerFrame();
 
@@ -529,8 +626,10 @@ function renderFrame() {
     const lastFrame  = Math.min(totalFrames, Math.ceil((scrollX + viewW) / ppf));
 
     const chunkStart = Math.floor(firstFrame / CHUNK_FRAMES) * CHUNK_FRAMES;
-    const chunkEnd   = Math.min(totalFrames,
-        Math.ceil(lastFrame / CHUNK_FRAMES) * CHUNK_FRAMES);
+    const chunkEnd   = Math.min(
+        totalFrames,
+        Math.ceil(lastFrame / CHUNK_FRAMES) * CHUNK_FRAMES
+    );
 
     for (let c = chunkStart; c < chunkEnd; c += CHUNK_FRAMES) {
         if (!STATE.tileCache.has(c) || STATE.dirty) {
@@ -558,20 +657,26 @@ function renderFrame() {
 /**
  * Render one chunk of frames into an ImageData.
  * Applies dB/linear scaling, gain, freq zoom, and LUT colormap.
- * LUT index 0 = lowest intensity, 255 = highest (correct orientation).
+ * LUT index 0 = lowest intensity (dark), 255 = highest (bright).
  *
  * @param {number} startFrame
  * @param {number} endFrame
  * @param {number} nBins
- * @param {number} viewH      - canvas height in pixels
- * @param {number} ppf        - pixels per frame (time zoom)
+ * @param {number} viewH   - canvas height in pixels
+ * @param {number} ppf     - pixels per frame (time zoom)
  * @returns {ImageData}
  */
 function renderTile(startFrame, endFrame, nBins, viewH, ppf) {
+    /**
+     * Render one chunk of frames into an ImageData.
+     * dB:     val=1 at 0 dBFS, val=0 at -dbRange dBFS.
+     * Linear: magnitude normalised to [0,1] with fixed 1.0 reference.
+     *         Gain control handles brightness instead of per-tile normalisation.
+     * LUT index 0 = dark, 255 = bright (correct for all included colormaps).
+     */
     const lut      = STATE.luts[STATE.cmap];
     const gainLin  = Math.pow(10, STATE.gainDb / 20);
     const nFrames  = endFrame - startFrame;
-    // Tile pixel width: ceil so no gaps between tiles at non-integer ppf
     const tileW    = Math.round(nFrames * ppf);
     const imgData  = new ImageData(tileW, viewH);
     const pix      = imgData.data;
@@ -583,36 +688,37 @@ function renderTile(startFrame, endFrame, nBins, viewH, ppf) {
     const usedBins = Math.max(1, fmaxBin - fminBin + 1);
 
     for (let px = 0; px < tileW; px++) {
-        // Map pixel column to source frame index (handles sub-pixel and multi-pixel frames)
         const f        = Math.min(nFrames - 1, Math.floor(px / ppf));
         const cacheOff = (startFrame + f) * nBins;
 
-        for (let row = 0; row < viewH; row++) {
-            // row=0 → top of canvas → fmaxHz; row=viewH-1 → fminHz
-            const bin = fminBin + Math.round((1 - (row + 0.5) / viewH) * (usedBins - 1));
-            const pow = STATE.magCache[cacheOff + bin] * gainLin * gainLin;
+        for (let px = 0; px < tileW; px++) {
+            const f        = Math.min(nFrames - 1, Math.floor(px / ppf));
+            const cacheOff = (startFrame + f) * nBins;
 
-            let val;
-            if (STATE.scale === 'db') {
-                // Map power (W²/Hz) to dB; floor at -dbRange, ceiling at 0 dB
-                const db = 10 * Math.log10(pow + 1e-12);
-                val = Math.max(0, Math.min(1, (db + STATE.dbRange) / STATE.dbRange));
-            } else {
-                // Linear magnitude, soft-normalised
-                val = Math.min(1, Math.sqrt(Math.max(0, pow)));
+            for (let row = 0; row < viewH; row++) {
+                // row=0 → top → fmaxHz; row=viewH-1 → bottom → fminHz
+                const bin = fminBin + Math.round((1 - (row + 0.5) / viewH) * (usedBins - 1));
+                const pow = STATE.magCache[cacheOff + bin] * gainLin * gainLin;
+
+                let val;
+                if (STATE.scale === 'db') {
+                    const db = 20 * Math.log10(Math.sqrt(pow) + 1e-12);
+                    val = Math.max(0, Math.min(1, (db + STATE.dbRange) / STATE.dbRange));
+                } else {
+                    val = Math.min(1, Math.sqrt(pow));
+                }
+
+                const lutIdx = Math.min(255, Math.floor(val * 255)) * 3;
+                const pixOff = (row * tileW + px) * 4;
+                pix[pixOff]     = lut[lutIdx];
+                pix[pixOff + 1] = lut[lutIdx + 1];
+                pix[pixOff + 2] = lut[lutIdx + 2];
+                pix[pixOff + 3] = 255;
             }
-
-            // LUT: index 0 = black/low, 255 = bright/high — correct orientation
-            const lutIdx = Math.min(255, Math.floor(val * 255)) * 3;
-            const pixOff = (row * tileW + px) * 4;
-            pix[pixOff]     = lut[lutIdx];
-            pix[pixOff + 1] = lut[lutIdx + 1];
-            pix[pixOff + 2] = lut[lutIdx + 2];
-            pix[pixOff + 3] = 255;
         }
-    }
 
     return imgData;
+    }
 }
 
 // === === === === === === === ===
@@ -620,7 +726,7 @@ function renderTile(startFrame, endFrame, nBins, viewH, ppf) {
 // ==== ==== ==== ==== ==== ====
 
 /**
- * Draw time axis below the spectrogram.
+ * Draw time axis ticks and labels below the spectrogram.
  *
  * @param {number} totalFrames
  * @param {number} canvasW
@@ -652,7 +758,7 @@ function drawTimeAxis(totalFrames, canvasW, ppf) {
 }
 
 /**
- * Draw frequency axis to the right of the spectrogram.
+ * Draw frequency axis ticks and labels to the right of the spectrogram.
  * Reflects the effective freq band after fmin/fmax and freq zoom.
  *
  * @param {number} viewH
@@ -674,7 +780,13 @@ function drawFreqAxis(viewH) {
     for (let t = 0; t <= nTicks; t++) {
         const frac   = t / nTicks;
         const y      = Math.round(frac * viewH);
-        const freqHz = fminHz + (fmaxHz - fminHz) * (1 - frac);
+
+        // Derive displayed frequency from the same row→bin→Hz mapping used in renderTile()
+        const row    = Math.round(frac * viewH);
+        const bin    = binForRow(row, viewH, (STATE.nfft >> 1) + 1, fminHz, fmaxHz);
+        const freqHz = bin / ((STATE.nfft >> 1)) * (STATE.sampleRate / 2);
+
+
         const label  = freqHz >= 1000
             ? (freqHz / 1000).toFixed(1) + 'k'
             : Math.round(freqHz) + '';
@@ -763,11 +875,26 @@ function wireControls() {
         saveParams();
     });
 
+
+    // --- Freq reset buttons ---
+    document.getElementById('btn-fmax-reset')?.addEventListener('click', () => {
+        setVal('ctrl-fmax', '');
+        STATE.fmax = null;
+        scheduleRender(false);
+        saveParams();
+    });
+
+    document.getElementById('btn-fmin-reset')?.addEventListener('click', () => {
+        setVal('ctrl-fmin', '');
+        STATE.fmin = 0;
+        scheduleRender(false);
+        saveParams();
+    });
+
     // --- Zoom sliders ---
     onMouseup('ctrl-zoom-time', () => {
         STATE.zoomTime = parseFloat(getVal('ctrl-zoom-time'));
         setText('zoom-time-val', zoomLabel(STATE.zoomTime));
-        // Time zoom changes canvas width — full repaint without FFT recompute
         scheduleRender(false);
         saveParams();
     });
@@ -790,15 +917,11 @@ function wireControls() {
             document.getElementById('ctrl-zoom-freq').value
         )));
     });
-
-    // --- Channel ---
-    // Channel selector remains a small inline btn-group if channels > 1,
-    // but is built dynamically after audio decode; wired separately in updateChannelSelector()
 }
 
 /**
  * Attach click delegation to a button group container.
- * On click, sets .active on the clicked button and calls cb with data-val.
+ * On click: sets .active on the clicked button and calls cb with data-val.
  *
  * @param {string}   groupId - element id of the .btn-group container
  * @param {function} cb      - called with the data-val string of the clicked button
@@ -830,7 +953,7 @@ function setBtnGroupActive(groupId, val) {
 }
 
 /**
- * Attach a mouseup + change handler to an element by id.
+ * Attach mouseup + change handlers to an element by id.
  *
  * @param {string}   id
  * @param {function} fn
@@ -843,7 +966,7 @@ function onMouseup(id, fn) {
 }
 
 /**
- * Attach a blur handler to an element by id.
+ * Attach blur + change handlers to an element by id.
  *
  * @param {string}   id
  * @param {function} fn
@@ -856,13 +979,13 @@ function onBlur(id, fn) {
 }
 
 /**
- * Re-render on scroll when crossing chunk boundaries.
+ * Re-render on horizontal scroll when crossing chunk boundaries.
  */
 function wireScroll() {
     const scroll = document.getElementById('spectro-scroll');
     scroll.addEventListener('scroll', () => {
-        const x        = scroll.scrollLeft;
-        const ppf      = pxPerFrame();
+        const x         = scroll.scrollLeft;
+        const ppf       = pxPerFrame();
         const prevChunk = Math.floor(STATE.lastScrollX / (CHUNK_FRAMES * ppf));
         const currChunk = Math.floor(x               / (CHUNK_FRAMES * ppf));
         if (prevChunk !== currChunk) {
@@ -879,11 +1002,11 @@ function wireScroll() {
 function wireCursorInfo() {
     const canvas = document.getElementById('spectro-canvas');
     canvas.addEventListener('mousemove', evt => {
-        const rect   = canvas.getBoundingClientRect();
-        const x      = evt.clientX - rect.left;
-        const y      = evt.clientY - rect.top;
-        const ppf    = pxPerFrame();
-        const frame  = Math.floor(x / ppf);
+        const rect    = canvas.getBoundingClientRect();
+        const x       = evt.clientX - rect.left;
+        const y       = evt.clientY - rect.top;
+        const ppf     = pxPerFrame();
+        const frame   = Math.floor(x / ppf);
         const timeSec = (frame * STATE.hop) / STATE.sampleRate;
 
         const { fminHz, fmaxHz } = effectiveFreqBand();
@@ -909,8 +1032,6 @@ function updateInfoBox(buf) {
     document.getElementById('info-sr').textContent  = `SR: ${buf.sampleRate} Hz`;
     document.getElementById('info-dur').textContent = `dur: ${buf.duration.toFixed(3)} s`;
     document.getElementById('info-ch').textContent  = `ch: ${buf.numberOfChannels}`;
-    document.getElementById('fmax-hint').textContent =
-        `Nyquist: ${(buf.sampleRate / 2).toLocaleString()} Hz`;
 
     if (window.SPECTRO_PAYLOAD.audioB64.length * 0.75 > WARN_SIZE_MB * 1024 * 1024) {
         document.getElementById('info-dur').textContent += '  ⚠ large';
@@ -919,23 +1040,20 @@ function updateInfoBox(buf) {
 
 /**
  * Rebuild the channel selector as a btn-group after audio decode.
+ * Only shows valid options for the current file's channel count.
  * Wires click handler and reflects saved STATE.channel.
  *
  * @param {number} nCh - number of channels in the decoded AudioBuffer
  */
 function updateChannelSelector(nCh) {
-    // Channel selector is appended to the panel dynamically
-    // so it only shows valid options for the current file
     let group = document.getElementById('bg-channel');
     if (!group) {
-        // Insert channel btn-group after freq-min ctrl-row
         const panel   = document.getElementById('panel');
         const wrapper = document.createElement('div');
         wrapper.className = 'ctrl-row';
         wrapper.innerHTML =
             '<label>C H A N N E L</label>' +
             '<div class="btn-group" id="bg-channel"></div>';
-        // Insert before info-box
         panel.insertBefore(wrapper, document.getElementById('info-box'));
         group = document.getElementById('bg-channel');
     }
@@ -943,15 +1061,15 @@ function updateChannelSelector(nCh) {
     group.innerHTML = '';
     const options = [{ val: '0', label: 'L' }];
     if (nCh > 1) {
-        options.push({ val: '1', label: 'R' });
+        options.push({ val: '1',   label: 'R'   });
         options.push({ val: 'mix', label: 'mix' });
     }
 
     const savedCh = String(STATE.channel);
     for (const opt of options) {
         const btn = document.createElement('button');
-        btn.dataset.val   = opt.val;
-        btn.textContent   = opt.label;
+        btn.dataset.val = opt.val;
+        btn.textContent = opt.label;
         if (opt.val === savedCh) btn.classList.add('active');
         group.appendChild(btn);
     }
@@ -983,15 +1101,16 @@ function setProgress(pct) {
 }
 
 /**
- * Display an error in the error overlay.
+ * Display an error message in the error overlay.
  */
 function showError(msg) {
     hideLoading();
     const el = document.getElementById('error-msg');
-    if (!el) return;
+    if (!el) { console.error('showError:', msg); return; }
     el.textContent   = msg;
     el.style.display = 'flex';
 }
+
 
 // === === === === === === === ===
 // D O M   U T I L I T I E S

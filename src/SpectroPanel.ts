@@ -57,8 +57,11 @@ export class SpectroEditorProvider implements vscode.CustomReadonlyEditorProvide
         const ext  = path.extname(uri.fsPath).toLowerCase().replace('.', '');
         const name = path.basename(uri.fsPath);
 
-        panel.webview.options = { enableScripts: true };
-
+        panel.webview.options = {
+            enableScripts      : true,
+            localResourceRoots : [vscode.Uri.joinPath(this.ctx.extensionUri, 'media')]
+        };
+        
         // --- LUT serialisation ---
         // Each LUT is transferred as a base64 string to avoid JSON number array bloat.
         const lutPayload: Record<string, string> = {};
@@ -546,10 +549,11 @@ function buildHtml(
   <div class="section-label">S C A L I N G</div>
 
   <div class="ctrl-row">
-    <label>S C A L E</label>
+    <label>Y   A X I S</label>
     <div class="btn-group" id="bg-scale">
-      <button data-val="db" class="active">dB</button>
-      <button data-val="linear">linear</button>
+      <button data-val="linear" class="active">lin</button>
+      <button data-val="log">log</button>
+      <button data-val="mel">mel</button>
     </div>
   </div>
 
@@ -579,15 +583,26 @@ function buildHtml(
     </div>
   </div>
 
-  <div class="ctrl-row">
+<div class="ctrl-row">
     <label>F R E Q   M A X   (H z)</label>
-    <input type="number" id="ctrl-fmax" min="1" step="100" value="">
-    <span class="val-display" id="fmax-hint">default: Nyquist</span>
+    <div style="display:flex;gap:2px;align-items:center">
+      <input type="text" inputmode="numeric" id="ctrl-fmax" placeholder="Nyquist"
+                  style="flex:1;background:var(--ctrl-bg);color:var(--fg);border:1px solid var(--border);border-radius:2px;padding:2px 4px;font:var(--font);-moz-appearance:textfield;">
+            <span id="fmax-hint" style="display:none"></span>
+
+      <button id="btn-fmax-reset" title="Reset to Nyquist"
+              style="background:var(--ctrl-bg);border:1px solid var(--border);border-radius:2px;color:var(--fg);cursor:pointer;padding:2px 4px;font-size:11px;line-height:1">↺</button>
+    </div>
   </div>
 
   <div class="ctrl-row">
     <label>F R E Q   M I N   (H z)</label>
-    <input type="number" id="ctrl-fmin" min="0" step="100" value="0">
+    <div style="display:flex;gap:2px;align-items:center">
+      <input type="text" inputmode="numeric" id="ctrl-fmin" placeholder="0"
+             style="flex:1;background:var(--ctrl-bg);color:var(--fg);border:1px solid var(--border);border-radius:2px;padding:2px 4px;font:var(--font);-moz-appearance:textfield;">
+      <button id="btn-fmin-reset" title="Reset to 0 Hz"
+              style="background:var(--ctrl-bg);border:1px solid var(--border);border-radius:2px;color:var(--fg);cursor:pointer;padding:2px 4px;font-size:11px;line-height:1">↺</button>
+    </div>
   </div>
 
   <div class="section-label">Z O O M</div>
@@ -633,6 +648,11 @@ function buildHtml(
 </div>
 
 <script>
+  window.onerror = function(msg, src, line, col, err) {
+    document.getElementById('error-msg').style.display = 'flex';
+    document.getElementById('error-msg').textContent   = msg + ' ' + src + ':' + line;
+  };
+
   window.SPECTRO_PAYLOAD = {
     filename : ${JSON.stringify(filename)},
     ext      : ${JSON.stringify(ext)},
