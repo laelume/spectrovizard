@@ -1,5 +1,5 @@
 
-# SpectroVizard: a lightweight spectrogram visualizer for codium/vscode
+# SpectroVizard: a lightweight spectrogram visualizer
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/laelume/spectrovizard/main/img/spectrovizard_icon.jpg" alt="spectrovizard" width="200">
