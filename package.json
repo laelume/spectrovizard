@@ -1,15 +1,36 @@
 {
   "name": "spectrovizard",
   "displayName": "SpectroVizard",
-  "description": "Lightweight spectrogram viewer for audio files",
+  "description": "Lightweight interactive spectrogram visualizer for audio audio analysis, bioacoustics, speech processing, and DSP research.",
   "version": "0.0.1",
   "publisher": "laelume",
+  "homepage": "https://github.com/laelume/spectrovizard",
   "repository": {
-  "type": "git",
-  "url": "https://github.com/laelume/spectrovizard"
+    "type": "git",
+    "url": "https://github.com/laelume/spectrovizard"
+  }, 
+  "bugs": {
+    "url": "https://github.com/laelume/spectrovizard/issues"
   },
+  "license": "MIT",
+  "icon": "img/spectrovizard_icon.png",
   "engines": { "vscode": "^1.85.0" },
-  "categories": ["Visualization"],
+  "categories": [
+    "Visualization", 
+    "Data Science", 
+    "Machine Learning"
+  ],
+  "keywords": [
+    "audio","audio-visualization","spectrogram",
+    "waveform","signal-processing","dsp","speech",
+    "speech-analysis","bioacoustics","acoustics",
+    "birdsong","animal-communication","audio-analysis",
+    "fft","frequency-analysis","sonogram","machine-learning",
+    "research","phonetics","phonology","linguistics",
+    "ecoacoustics","wildlife-audio","audio-research",
+    "time-frequency-analysis","passive-acoustic-monitoring",
+    "pam"
+  ],
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
