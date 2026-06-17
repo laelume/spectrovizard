@@ -2,7 +2,7 @@
   "name": "spectrovizard",
   "displayName": "SpectroVizard",
   "description": "Lightweight interactive spectrogram visualizer for audio audio analysis, bioacoustics, speech processing, and DSP research.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "laelume",
   "homepage": "https://github.com/laelume/spectrovizard",
   "repository": {
