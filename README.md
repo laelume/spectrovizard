@@ -7,14 +7,14 @@
 
 ## Basic Usage
 
-Navigate through audio files in Explorer, and spectrograms open on-click. Wizardry!  
-You can scroll, zoom, and adjust FFT parameters to quickly inspect audio files.  
+Navigate through audio files in Codium Explorer, and spectrograms open on-click. Wizardry!  
+You can also scroll, zoom, and adjust FFT parameters to quickly inspect audio files.  
 
 ## Supported formats
 
 WAV, MP3, FLAC, OGG, M4A, AAC, PCM
 
-## FFT Parameters
+## Audio Parameters
 
 | Parameter     | Effect |
 |-----------    |--------|
