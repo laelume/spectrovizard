@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/<user>/<repo>/<branch>/img/spectrovizard_icon.jpg" alt="spectrovizard" width="128">
+  <img src="https://raw.githubusercontent.com/laelume/spectrovizard/main/img/spectrovizard_icon.jpg" alt="spectrovizard" width="128">
 </p>
 
 # SpectroVizard
