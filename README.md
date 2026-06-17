@@ -1,8 +1,10 @@
+
+# SpectroVizard
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/laelume/spectrovizard/main/img/spectrovizard_icon.jpg" alt="spectrovizard" width="128">
 </p>
 
-# SpectroVizard
 
 Lightweight spectrogram visualizer for Codium (and VSCode). 
 Displays audio spectrogram on click in native file editor. 
