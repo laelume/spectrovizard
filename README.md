@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/<user>/<repo>/<branch>/img/spectrovizard_icon.jpg" alt="spectrovizard" width="128">
+</p>
+
 # SpectroVizard
 
 Lightweight spectrogram visualizer for Codium (and VSCode). 
@@ -42,4 +46,5 @@ If neither is present a dialog will prompt on open.
 
 ## License
 
-Copyright 2026 laelume. Licensed under GPL-3. 
+Copyright 2026 laelume
+MIT License
