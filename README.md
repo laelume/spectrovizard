@@ -1,18 +1,16 @@
 
-# SpectroVizard: a lightweight spectrogram visualizer
+# SpectroVizard: a lightweight audio spectrogram visualizer
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/laelume/spectrovizard/main/img/spectrovizard_icon.jpg" alt="spectrovizard" width="200">
 </p>
 
+
 ## Basic Usage
 
-Navigate through audio files in Codium Explorer, and spectrograms open on-click. Wizardry!  
+Navigate through audio files in Codium or VSCode Explorer, and spectrograms open on-click. Wizardry!  
 You can also scroll, zoom, and adjust FFT parameters to quickly inspect audio files.  
 
-## Supported formats
-
-WAV, MP3, FLAC, OGG, M4A, AAC, PCM
 
 ## Audio Parameters
 
@@ -29,6 +27,12 @@ WAV, MP3, FLAC, OGG, M4A, AAC, PCM
 | Freq max      | Set maximum frequency value (Blank = full Nyquist) |
 | Channel       | Left, right, or mixed mono |
 
+
+## Supported formats
+
+WAV, MP3, FLAC, OGG, M4A, AAC, PCM
+
+
 ## Note about PCM files
 
 Raw `.pcm` has no header. Provide format via sidecar or filename:
@@ -43,4 +47,4 @@ If none are present, a dialog will prompt on open as a flag.
 ## License
 
 Copyright 2026 laelume  
-MIT License  
+Licensed under GPL-3.0
